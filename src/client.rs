@@ -744,7 +744,15 @@ impl Client {
         let key = self.conf.public_key.clone().unwrap();
         log::info!("try to get wg conf from remote");
         let wg_info = self.fetch_peer_info(&key).await?;
-        let mtu = wg_info.setting.vpn_mtu;
+        let mtu = match &self.conf.override_mtu {
+            Some(override_mtu) => {
+                override_mtu.parse::<u32>().unwrap_or_else(|_| {
+                    log::error!("failed to parse override_mtu {}", override_mtu);
+                    wg_info.setting.vpn_mtu
+                })
+            }
+            None => wg_info.setting.vpn_mtu,
+        };
         let dns = wg_info.setting.vpn_dns;
         let peer_key = wg_info.public_key;
         let public_key = self.conf.public_key.clone().unwrap();
