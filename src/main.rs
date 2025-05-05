@@ -60,10 +60,16 @@ async fn main() {
         .init();
 
     print_version();
-    check_previlige();
 
     let conf_file = parse_arg();
     let mut conf = Config::from_file(&conf_file).await;
+
+    if conf.disable_check_privilege == Some(true) {
+        log::warn!("check privilege is disabled");
+    } else {
+        check_privilege();
+    }
+
     let name = conf.interface_name.clone().unwrap();
 
     match conf.server {
@@ -172,7 +178,7 @@ async fn main() {
     exit(exit_code)
 }
 
-fn check_previlige() {
+fn check_privilege() {
     #[cfg(unix)]
     match sudo::escalate_if_needed() {
         Ok(_) => {}
