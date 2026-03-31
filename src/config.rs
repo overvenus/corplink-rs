@@ -1,6 +1,7 @@
 use std::fmt;
 use tokio::fs;
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::state::State;
@@ -47,23 +48,27 @@ pub struct Config {
     pub vpn_select_strategy: Option<String>,
     pub override_mtu: Option<String>,
     pub disable_check_privilege: Option<bool>,
+    pub use_vpn_dns: Option<bool>,
+    pub auto_setup_routes: Option<bool>,
 }
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let s = serde_json::to_string_pretty(self).unwrap();
-        write!(f, "{}", s)
+        match serde_json::to_string_pretty(self) {
+            Ok(s) => write!(f, "{}", s),
+            Err(e) => write!(f, "<invalid config: {e}>")
+        }
     }
 }
 
 impl Config {
-    pub async fn from_file(file: &str) -> Config {
+    pub async fn from_file(file: &str) -> Result<Config> {
         let conf_str = fs::read_to_string(file)
             .await
-            .unwrap_or_else(|e| panic!("failed to read config file {}: {}", file, e));
+            .with_context(|| format!("failed to read config file {file}"))?;
 
         let mut conf: Config = serde_json::from_str(&conf_str[..])
-            .unwrap_or_else(|e| panic!("failed to parse config file {}: {}", file, e));
+            .with_context(|| format!("failed to parse config file {file}"))?;
 
         conf.conf_file = Some(file.to_string());
         let mut update_conf = false;
@@ -76,10 +81,11 @@ impl Config {
             update_conf = true;
         }
         if conf.device_id.is_none() {
-            conf.device_id = Some(format!(
-                "{:x}",
-                md5::compute(conf.device_name.clone().unwrap())
-            ));
+            let device_name = conf
+                .device_name
+                .as_ref()
+                .context("device name missing when generating device id")?;
+            conf.device_id = Some(format!("{:x}", md5::compute(device_name)));
             update_conf = true;
         }
         match &conf.private_key {
@@ -89,7 +95,7 @@ impl Config {
                 }
                 None => {
                     // only private key exists, generate public from private
-                    let public_key = utils::gen_public_key_from_private(private_key).unwrap();
+                    let public_key = utils::gen_public_key_from_private(private_key)?;
                     conf.public_key = Some(public_key);
                     update_conf = true;
                 }
@@ -102,15 +108,21 @@ impl Config {
             }
         }
         if update_conf {
-            conf.save().await;
+            conf.save().await?;
         }
-        conf
+        Ok(conf)
     }
 
-    pub async fn save(&self) {
-        let file = self.conf_file.as_ref().unwrap();
+    pub async fn save(&self) -> Result<()> {
+        let file = self
+            .conf_file
+            .as_ref()
+            .context("config file path missing")?;
         let data = format!("{}", &self);
-        fs::write(file, data).await.unwrap();
+        fs::write(file, data)
+            .await
+            .with_context(|| format!("failed to write config file {file}"))?;
+        Ok(())
     }
 }
 
@@ -118,15 +130,16 @@ impl Config {
 pub struct WgConf {
     // standard wg conf
     pub address: String,
-    pub mask: u32,
+    pub address6: String,
     pub peer_address: String,
     pub mtu: u32,
     pub public_key: String,
     pub private_key: String,
     pub peer_key: String,
-    pub route: Vec<String>,
+    pub allowed_ips: Vec<String>,
+    pub routes: Vec<String>,
 
-    // extent confs
+    // extra confs
     pub dns: String,
 
     // corplink confs

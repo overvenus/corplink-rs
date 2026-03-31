@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::config::Config;
@@ -9,7 +10,7 @@ pub const URL_GET_COMPANY: &str = "https://corplink.volcengine.cn/api/match";
 
 const URL_GET_LOGIN_METHOD: &str = "{{url}}/api/login/setting?os={{os}}&os_version={{version}}";
 const URL_GET_TPS_LOGIN_METHOD: &str = "{{url}}/api/tpslogin/link?os={{os}}&os_version={{version}}";
-const URL_GET_TPS_TOEKN_CHECK: &str =
+const URL_GET_TPS_TOKEN_CHECK: &str =
     "{{url}}/api/tpslogin/token/check?os={{os}}&os_version={{version}}";
 const URL_GET_CORPLINK_LOGIN_METHOD: &str = "{{url}}/api/lookup?os={{os}}&os_version={{version}}";
 const URL_REQUEST_CODE: &str = "{{url}}/api/login/code/send?os={{os}}&os_version={{version}}";
@@ -37,7 +38,7 @@ pub enum ApiName {
     ConnectVPN,
     KeepAliveVPN,
     DisconnectVPN,
-    OTP,
+    Otp,
 }
 
 #[derive(Clone, Serialize)]
@@ -62,7 +63,7 @@ pub struct ApiUrl {
 }
 
 impl ApiUrl {
-    pub fn new(conf: &Config) -> ApiUrl {
+    pub fn new(conf: &Config) -> Result<ApiUrl> {
         let os = "Android".to_string();
         let version = "2".to_string();
         let mut api_template = HashMap::new();
@@ -74,7 +75,7 @@ impl ApiUrl {
         );
         api_template.insert(
             ApiName::TpsTokenCheck,
-            Template::new(URL_GET_TPS_TOEKN_CHECK),
+            Template::new(URL_GET_TPS_TOKEN_CHECK),
         );
         api_template.insert(
             ApiName::CorplinkLoginMethod,
@@ -88,11 +89,14 @@ impl ApiUrl {
         api_template.insert(ApiName::ConnectVPN, Template::new(URL_FETCH_PEER_INFO));
         api_template.insert(ApiName::KeepAliveVPN, Template::new(URL_OPERATE_VPN));
         api_template.insert(ApiName::DisconnectVPN, Template::new(URL_OPERATE_VPN));
-        api_template.insert(ApiName::OTP, Template::new(URL_OTP));
+        api_template.insert(ApiName::Otp, Template::new(URL_OTP));
 
-        ApiUrl {
+        Ok(ApiUrl {
             user_param: UserUrlParam {
-                url: conf.server.clone().unwrap(),
+                url: conf
+                    .server
+                    .clone()
+                    .context("server url missing in config")?,
                 os: os.clone(),
                 version: version.clone(),
             },
@@ -102,7 +106,7 @@ impl ApiUrl {
                 version,
             },
             api_template,
-        }
+        })
     }
 
     pub fn get_api_url(&self, name: &ApiName) -> String {
@@ -117,7 +121,7 @@ impl ApiUrl {
             ApiName::LoginEmail => self.api_template[name].render(user_param),
             ApiName::LoginPassword => self.api_template[name].render(user_param),
             ApiName::ListVPN => self.api_template[name].render(user_param),
-            ApiName::OTP => self.api_template[name].render(user_param),
+            ApiName::Otp => self.api_template[name].render(user_param),
 
             ApiName::PingVPN => self.api_template[name].render(vpn_param),
             ApiName::ConnectVPN => self.api_template[name].render(vpn_param),
