@@ -16,6 +16,7 @@ pacman -U corplink-rs-4.1-1-x86_64.pkg.tar.zst
 
 ## 手动编译
 
+### linux/macos
 
 ```bash
 git clone https://github.com/PinkD/corplink-rs --depth 1
@@ -30,6 +31,10 @@ cargo build --release
 # install corplink-rs to your PATH
 mv target/release/corplink-rs /usr/bin/
 ```
+
+### windows
+
+参考 [#34](https://github.com/PinkD/corplink-rs/issues/34)
 
 # 用法
 
@@ -56,7 +61,16 @@ windows 中启动 `wg-go` 需要 [wintun](6) 支持，请到官网下载，并�
 
 ## macos 特殊说明
 
-macos 要求 tun 设备的名称满足正则表达式 `utun[0-9]*` ，因此需要将配置文件中的 `interface_name` 改为符合正则的名字，例如 `utun114514`
+macos 要求 tun 设备的名称满足正则表达式 `utun[0-9]*` ，因此需要将配置文件中的 `interface_name` 改为符合正则的名字，例如 `utun12345`  
+另外， `utun` 后的数字类型应该是 `int16` ，如果大于 `32767` 会报错 `Failed to create TUN device: invalid argument` 。具体参考 [#46](https://github.com/PinkD/corplink-rs/issues/46)
+
+## log level 配置
+
+本项目使用 [env_logger](https://docs.rs/env_logger/latest/env_logger/) 作为 log 库，修改 log level 需要使用环境变量，示例：
+
+```bash
+RUST_LOG=debug ./corplink-rs config.json
+```
 
 # 配置文件实例
 
@@ -108,7 +122,13 @@ macos 要求 tun 设备的名称满足正则表达式 `utun[0-9]*` ，因此需�
   // latency/default
   // latency: choose the server with the lowest latency
   // default: choose the first available server
-  "vpn_select_strategy": "latency"
+  "vpn_select_strategy": "latency",
+  // use vpn dns for macos
+  // NOTE: if process doesn't exit gracefully, your dns may not be restored
+  "use_vpn_dns": false,
+  // automatically setup system routes (default: true)
+  // set to false if you want to manually configure routes
+  "auto_setup_routes": true
 }
 ```
 
@@ -174,7 +194,7 @@ graph TD;
 # TODO
 
 - [ ] 使用 [Tauri][7] 实现界面(~~或许大概可能永远不会有~~)
-- [ ] 实现 TCP 版的 wg 协议
+- [x] 实现 TCP 版的 wg 协议
 - [x] 为不同配置生成不同的 `cookies.json`
 - [x] windows/mac 实现
 - [x] 自动使用从服务器返回的请求中的时间戳同步时间
@@ -183,6 +203,24 @@ graph TD;
 
 # Changelog
 
+- 0.5.4
+  - fix memory leak in unsafe code
+  - refactor error handling with `anyhow`
+  - fix default log level
+  - add ci for push event(@yanyongyu)
+- 0.5.3
+  - remove keep-alive api call
+- 0.5.2
+  - add ipv6 support(@hexchain @ManiaciaChao)
+- 0.5.1
+  - support using dns from server for macos(@fanwenlin)
+  - fix high cpu usage
+- 0.5.0
+  - add tcp support for wg-go
+- 0.4.4
+  - add macos release(by @overvenus)
+  - fix single ip route(by @simpleapples)
+  - add qr code suuport for feishu login(@simpleapples)
 - 0.4.3
   - support corplink 2.2.x(by @jixiuf)
 - 0.4.2
@@ -246,7 +284,8 @@ graph TD;
 # License
 
 ```license
- Copyright (C) 2023  PinkD, ShuNing, LionheartLann, XYenon, Verge, jixiuf
+ Copyright (C) 2023  PinkD, ShuNing, LionheartLann, XYenon, Verge, jixiuf,
+ simpleapples, overvenus, fanwenlin, hexchain, ManiaciaChao, yanyongyu
 
     This program is free software; you can redistribute it and/or
     modify it under the terms of the GNU General Public License
