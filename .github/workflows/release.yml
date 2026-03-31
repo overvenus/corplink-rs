@@ -83,7 +83,7 @@ jobs:
       - name: build libwg
         run: cd libwg && ./build.sh
       - name: build package
-        run: cargo build --release
+        run: cargo build --release --features static
       - name: build tarball
         run: |
           cd target
@@ -123,7 +123,7 @@ jobs:
       - name: rust use gnu toolchain
         run: rustup default stable-x86_64-pc-windows-gnu
       - name: build package
-        run: cargo build --release
+        run: cargo build --release --features static
       - name: build check result
         run: |
           Move-Item -Path "target/release/corplink-rs.exe" -Destination "."
