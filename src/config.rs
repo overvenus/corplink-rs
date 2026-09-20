@@ -12,6 +12,9 @@ const DEFAULT_INTERFACE_NAME: &str = "corplink";
 
 pub const PLATFORM_LDAP: &str = "ldap";
 pub const PLATFORM_CORPLINK: &str = "feilian";
+// new feilian login that uses the v1 API (/api/v1/login with an AES-encrypted
+// password), as served by the newer feilian backend. opt-in via config.
+pub const PLATFORM_CORPLINK_V1: &str = "feilian_v1";
 pub const PLATFORM_OIDC: &str = "OIDC";
 // aka feishu
 pub const PLATFORM_LARK: &str = "lark";
@@ -26,6 +29,25 @@ pub const PLATFORM_AAD: &str = "aad";
 
 pub const STRATEGY_LATENCY: &str = "latency";
 pub const STRATEGY_DEFAULT: &str = "default";
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteMode {
+    /// Only intranet routes returned by the server (mimics official split mode).
+    #[default]
+    Split,
+    /// Full-tunnel routes from the server (typically 0.0.0.0/0, ::/0).
+    Full,
+}
+
+impl fmt::Display for RouteMode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            RouteMode::Split => write!(f, "split"),
+            RouteMode::Full => write!(f, "full"),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -49,14 +71,49 @@ pub struct Config {
     pub override_mtu: Option<String>,
     pub disable_check_privilege: Option<bool>,
     pub use_vpn_dns: Option<bool>,
+    pub dns_backup_filename: Option<String>,
     pub auto_setup_routes: Option<bool>,
+    /// "split" (default) or "full". Selects which route list from the server to apply.
+    pub route_mode: Option<RouteMode>,
+    /// Optional CIDRs added to the server-provided routes before route filters.
+    /// Unlike `vpn_allowed_routes`, this expands the route set. The combined routes
+    /// are then restricted by `vpn_allowed_routes` and `vpn_disallowed_routes`.
+    pub vpn_additional_routes: Option<Vec<String>>,
+    /// Optional hostnames resolved on every connection. Resolved addresses are appended
+    /// as host routes before route filters.
+    pub vpn_additional_domains: Option<Vec<String>>,
+    /// Optional CIDR whitelist intersected with the server and additional routes.
+    /// Missing/null preserves the combined routes; an empty list allows no routes.
+    pub vpn_allowed_routes: Option<Vec<String>>,
+    /// Optional list of CIDR routes to exclude from AllowedIPs / system routes.
+    /// Useful in full mode to punch holes for local LAN or the VPN peer IP itself,
+    /// avoiding routing loops (e.g. 192.168.1.0/24, 10.0.0.5/32).
+    pub vpn_disallowed_routes: Option<Vec<String>>,
+    /// When set, run entirely in userspace (gVisor netstack) and expose a SOCKS5
+    /// proxy at this listen address (e.g. "0.0.0.0:1080" or "127.0.0.1:1080")
+    /// instead of creating a kernel TUN device. No system interface, routes, DNS
+    /// changes or root privileges are required. Only TCP CONNECT is supported.
+    pub socks5_listen: Option<String>,
+    /// Optional SOCKS5 username/password authentication (RFC 1929). When
+    /// `socks5_username` is set and non-empty, clients must authenticate with
+    /// these credentials; otherwise the proxy accepts connections without auth.
+    pub socks5_username: Option<String>,
+    pub socks5_password: Option<String>,
+    /// Force the WireGuard transport protocol instead of using the server-advertised
+    /// `protocol_mode`. Accepts "udp" or "tcp" (case-insensitive). Some `protocol_mode: 1`
+    /// (TCP) gateways also accept WireGuard over UDP -- for those the server even ships a
+    /// `protocol_detect_config` (udp<->tcp switch thresholds) in the `/api/vpn/list` entry.
+    /// Since WireGuard-over-TCP can collapse to a few KB/s on a lossy uplink (TCP-over-TCP
+    /// head-of-line blocking), forcing "udp" can be far faster there. Leave unset to keep the
+    /// default (follow server `protocol_mode`: 1 => tcp, otherwise udp).
+    pub force_protocol: Option<String>,
 }
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match serde_json::to_string_pretty(self) {
             Ok(s) => write!(f, "{}", s),
-            Err(e) => write!(f, "<invalid config: {e}>")
+            Err(e) => write!(f, "<invalid config: {e}>"),
         }
     }
 }

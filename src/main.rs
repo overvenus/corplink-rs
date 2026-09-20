@@ -13,7 +13,7 @@ mod wg;
 #[cfg(windows)]
 use is_elevated;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use dns::DNSManager;
 
 use std::env;
@@ -89,9 +89,21 @@ async fn run() -> Result<()> {
         .interface_name
         .clone()
         .context("interface name missing in config")?;
+    let socks5_listen = conf.socks5_listen.clone();
+    let socks5_username = conf.socks5_username.clone().unwrap_or_default();
+    let socks5_password = conf.socks5_password.clone().unwrap_or_default();
+    let netstack_mode = socks5_listen.is_some();
 
-    #[cfg(target_os = "macos")]
+    // netstack/socks5 mode runs entirely in userspace (no kernel TUN device,
+    // no system routes/dns), so it does not require elevated privileges.
+    if !netstack_mode {
+        check_privilege();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let use_vpn_dns = conf.use_vpn_dns.unwrap_or(false);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let dns_backup_filename = conf.dns_backup_filename.clone();
 
     if conf.server.is_none() {
         let resp = client::get_company_url(conf.company_name.as_str())
@@ -115,6 +127,7 @@ async fn run() -> Result<()> {
     }
 
     let with_wg_log = conf.debug_wg.unwrap_or_default();
+    let platform = conf.platform.clone();
     let mut c = Client::new(conf).context("failed to initialize client")?;
     let mut logout_retry = true;
     let wg_conf: Option<WgConf>;
@@ -143,21 +156,38 @@ async fn run() -> Result<()> {
             }
         };
     }
-    log::info!("start wg-corplink for {}", &name);
     let wg_conf = wg_conf.ok_or_else(|| anyhow!("wg conf missing after connect loop"))?;
     let protocol = wg_conf.protocol;
-    wg::start_wg_go(&name, protocol, with_wg_log)
-        .with_context(|| format!("failed to start wg-corplink for {}", name))?;
     let mut uapi = wg::UAPIClient { name: name.clone() };
-    uapi.config_wg(&wg_conf)
-        .await
-        .with_context(|| format!("failed to config interface with uapi for {name}"))?;
+    if let Some(listen) = &socks5_listen {
+        log::info!("start wg-corplink (netstack/socks5) on {}", listen);
+        wg::start_wg_go_netstack(&wg_conf, listen, &socks5_username, &socks5_password, with_wg_log)
+            .context("failed to start wg-corplink in netstack mode")?;
+        uapi.config_wg_netstack(&wg_conf)
+            .await
+            .context("failed to config netstack interface with uapi")?;
+        if socks5_username.is_empty() {
+            log::info!("socks5 proxy ready at {} (no auth)", listen);
+        } else {
+            log::info!(
+                "socks5 proxy ready at {} (username/password auth required)",
+                listen
+            );
+        }
+    } else {
+        log::info!("start wg-corplink for {}", &name);
+        wg::start_wg_go(&name, protocol, with_wg_log)
+            .with_context(|| format!("failed to start wg-corplink for {}", name))?;
+        uapi.config_wg(&wg_conf)
+            .await
+            .with_context(|| format!("failed to config interface with uapi for {name}"))?;
+    }
 
-    #[cfg(target_os = "macos")]
-    let mut dns_manager = DNSManager::new();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let mut dns_manager = DNSManager::new(dns_backup_filename);
 
-    #[cfg(target_os = "macos")]
-    if use_vpn_dns {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if use_vpn_dns && !netstack_mode {
         match dns_manager.set_dns(vec![&wg_conf.dns], vec![]) {
             Ok(_) => {}
             Err(err) => {
@@ -168,16 +198,7 @@ async fn run() -> Result<()> {
 
     let mut exit_code = 0;
     tokio::select! {
-        // handle signal
-        _ = async {
-            match tokio::signal::ctrl_c().await {
-                Ok(_) => {},
-                Err(e) => {
-                    log::warn!("failed to receive signal: {}",e);
-                },
-            }
-            log::info!("ctrl+c received");
-        } => {},
+        _ = wait_for_shutdown_signal() => {},
 
         // keep alive
         // _ = c.keep_alive_vpn(&wg_conf, 60) => {
@@ -199,10 +220,18 @@ async fn run() -> Result<()> {
         log::warn!("failed to disconnect vpn: {}", e)
     };
 
+    // only logout for feilian_v1
+    if platform.as_deref() == Some(config::PLATFORM_CORPLINK_V1) {
+        log::info!("logging out current terminal...");
+        if let Err(e) = c.logout().await {
+            log::warn!("failed to logout: {}", e)
+        };
+    }
+
     wg::stop_wg_go();
 
-    #[cfg(target_os = "macos")]
-    if use_vpn_dns {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if use_vpn_dns && !netstack_mode {
         match dns_manager.restore_dns() {
             Ok(_) => {}
             Err(err) => {
@@ -213,6 +242,47 @@ async fn run() -> Result<()> {
 
     log::info!("reach exit");
     exit(exit_code)
+}
+
+// Resolve when the process is asked to terminate: ctrl+c (SIGINT) or, on unix,
+// SIGTERM (sent by `docker stop`, systemd, `kill`, etc). Handling SIGTERM lets
+// the graceful shutdown path run — notably the feilian_v1 logout that releases
+// the server-side terminal slot, which is otherwise leaked on every stop.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::warn!("failed to install SIGTERM handler: {}", e);
+                None
+            }
+        };
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => {
+                if let Err(e) = r {
+                    log::warn!("failed to receive signal: {}", e);
+                }
+                log::info!("ctrl+c received");
+            }
+            _ = async {
+                match term.as_mut() {
+                    Some(t) => { t.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                log::info!("SIGTERM received");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            log::warn!("failed to receive signal: {}", e);
+        }
+        log::info!("ctrl+c received");
+    }
 }
 
 fn check_privilege() {
